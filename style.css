@@ -1,0 +1,17 @@
+/* 自訂轉場與微動畫 */
+.hidden {
+    display: none !important;
+}
+
+button, input, select {
+    transition: all 0.2s ease-in-out;
+}
+
+button:active {
+    transform: scale(0.98);
+}
+
+/* 讓密碼或按鈕在滑鼠懸停時有微光效果 */
+input:focus, select:focus {
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+}

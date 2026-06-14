@@ -1,0 +1,585 @@
+/* ============================================================
+   外幣匯率到價通知系統 - JavaScript 核心邏輯
+   前端互動、Google 登入、表單處理、API 通信
+   ============================================================ */
+
+// ========== 【全域變數配置】 ==========
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbwNMEdOoFf-9QsdMfziEyjGWYNGtgXWKX5d0jKIrKOEcItPXtuXtHadwXziCztJyZcPWw/exec';
+const GOOGLE_CLIENT_ID = '640063171909-dcbrqqp90o2t6eprmtqtrlh46g2iqre9.apps.googleusercontent.com'; // ✅ Google Client ID 已設置
+
+// ⚠️ 重要：請在下方修改為您的 Email 地址 (用於管理員權限判斷)
+let adminEmail = "hankwang0924@gmail.com"; // ✅ 管理員 Email 已設置
+
+// 全域狀態變數
+let currentUser = {
+    email: null,
+    name: null,
+    picture: null,
+    isAdmin: false
+};
+
+let isAdminView = false;
+let currencyChart = null; // Chart.js 圖表實例
+
+// 常用 DOM 元素快取
+const DOM = {
+    userInfo: document.getElementById('user-info'),
+    userEmail: document.getElementById('user-email'),
+    userAvatar: document.getElementById('user-avatar'),
+    googleSigninContainer: document.getElementById('google-signin-container'),
+    adminToggleBtn: document.getElementById('admin-toggle-btn'),
+    logoutBtn: document.getElementById('logout-btn'),
+    rateNotificationForm: document.getElementById('rate-notification-form'),
+    notificationEmail: document.getElementById('notification-email'),
+    currencySelect: document.getElementById('currency-select'),
+    conditionSelect: document.getElementById('condition-select'),
+    targetRate: document.getElementById('target-rate'),
+    userPage: document.getElementById('user-page'),
+    adminPage: document.getElementById('admin-page'),
+    userHistoryTbody: document.getElementById('user-history-tbody'),
+    adminHistoryTbody: document.getElementById('admin-history-tbody'),
+    toastContainer: document.getElementById('toast-container'),
+    currencyChart: document.getElementById('currency-chart'),
+    pendingCount: document.getElementById('pending-count'),
+    sentCount: document.getElementById('sent-count'),
+    totalSubscriptions: document.getElementById('total-subscriptions')
+};
+
+/* ========== 【初始化】 ========== */
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('🚀 應用程式初始化中...');
+    initializeGoogleSignIn();
+    attachEventListeners();
+});
+
+/* ========== 【Google 登入初始化】 ========== */
+function initializeGoogleSignIn() {
+    // 檢查本地存儲是否有已登入的使用者資料
+    const savedUser = localStorage.getItem('currentUser');
+    if (savedUser) {
+        try {
+            currentUser = JSON.parse(savedUser);
+            updateUIAfterLogin();
+            return;
+        } catch (error) {
+            console.error('❌ 讀取本地使用者資料失敗:', error);
+            localStorage.removeItem('currentUser');
+        }
+    }
+
+    // 初始化 Google Sign-In 按鈕
+    window.google?.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleSignIn,
+        auto_select: false,
+        cancel_on_tap_outside: true
+    });
+
+    // 在指定容器中渲染 Google Sign-In 按鈕
+    window.google?.accounts.id.renderButton(
+        DOM.googleSigninContainer,
+        {
+            theme: 'dark',
+            size: 'large',
+            text: 'signin_with'
+        }
+    );
+
+    DOM.googleSigninContainer.classList.remove('hidden');
+}
+
+/* ========== 【Google 登入回調】 ========== */
+function handleGoogleSignIn(response) {
+    if (!response.credential) {
+        showToast('❌ 登入失敗，請重試', 'error');
+        return;
+    }
+
+    try {
+        // 解碼 JWT Token
+        const base64Url = response.credential.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(
+            atob(base64).split('').map((c) => {
+                return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+            }).join('')
+        );
+        
+        const tokenPayload = JSON.parse(jsonPayload);
+        
+        // 儲存使用者資料
+        currentUser = {
+            email: tokenPayload.email,
+            name: tokenPayload.name,
+            picture: tokenPayload.picture,
+            isAdmin: tokenPayload.email === adminEmail
+        };
+
+        // 保存到本地存儲
+        localStorage.setItem('currentUser', JSON.stringify(currentUser));
+
+        console.log('✅ 登入成功:', currentUser.email);
+        showToast(`👋 歡迎 ${currentUser.name}！`, 'success');
+        
+        updateUIAfterLogin();
+    } catch (error) {
+        console.error('❌ 解碼 Google Token 失敗:', error);
+        showToast('❌ 登入處理失敗', 'error');
+    }
+}
+
+/* ========== 【更新登入後的 UI】 ========== */
+function updateUIAfterLogin() {
+    // 隱藏登入按鈕
+    DOM.googleSigninContainer.classList.add('hidden');
+
+    // 顯示使用者資訊
+    DOM.userInfo.classList.remove('hidden');
+    DOM.userEmail.textContent = currentUser.email;
+    DOM.userAvatar.src = currentUser.picture;
+
+    // 顯示登出按鈕
+    DOM.logoutBtn.classList.remove('hidden');
+
+    // 自動填入 Email 欄位
+    DOM.notificationEmail.value = currentUser.email;
+
+    // 如果是管理員，顯示管理員按鈕
+    if (currentUser.isAdmin) {
+        DOM.adminToggleBtn.classList.remove('hidden');
+        console.log('👑 管理員模式已啟用');
+    }
+
+    // 載入使用者歷史設定
+    loadUserHistory();
+}
+
+/* ========== 【事件監聽器】 ========== */
+function attachEventListeners() {
+    // 表單提交
+    DOM.rateNotificationForm.addEventListener('submit', handleFormSubmit);
+
+    // 登出按鈕
+    DOM.logoutBtn.addEventListener('click', handleLogout);
+
+    // 管理員切換按鈕
+    DOM.adminToggleBtn.addEventListener('click', toggleAdminView);
+
+    // 幣別選擇變化時更新 placeholder
+    DOM.currencySelect.addEventListener('change', updatePlaceholder);
+
+    console.log('✅ 事件監聽器已綁定');
+}
+
+/* ========== 【表單提交】 ========== */
+async function handleFormSubmit(event) {
+    event.preventDefault();
+
+    // 驗證表單
+    if (!validateForm()) {
+        return;
+    }
+
+    const formData = {
+        email: DOM.notificationEmail.value,
+        currency: DOM.currencySelect.value,
+        condition: DOM.conditionSelect.value,
+        targetRate: parseFloat(DOM.targetRate.value),
+        timestamp: new Date().toISOString(),
+        status: 'Pending'
+    };
+
+    try {
+        // 顯示載入狀態
+        const submitBtn = DOM.rateNotificationForm.querySelector('button[type="submit"]');
+        const originalText = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner"></span> 送出中...';
+
+        // 使用 Fetch API 發送資料到 GAS
+        const response = await fetch(GAS_URL, {
+            method: 'POST',
+            body: JSON.stringify(formData),
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const result = await response.json();
+
+        // 恢復按鈕狀態
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalText;
+
+        if (result.success) {
+            showToast(`✨ 成功設定 ${formData.currency} 通知！`, 'success');
+            DOM.rateNotificationForm.reset();
+            
+            // 重新載入歷史記錄
+            loadUserHistory();
+        } else {
+            showToast(`❌ 設定失敗: ${result.message}`, 'error');
+        }
+    } catch (error) {
+        console.error('❌ 提交表單時出錯:', error);
+        showToast('❌ 網路連接失敗，請檢查 GAS URL 配置', 'error');
+        
+        const submitBtn = DOM.rateNotificationForm.querySelector('button[type="submit"]');
+        submitBtn.disabled = false;
+        submitBtn.textContent = '✨ 設定通知';
+    }
+}
+
+/* ========== 【表單驗證】 ========== */
+function validateForm() {
+    if (!DOM.notificationEmail.value) {
+        showToast('❌ 請先登入 Google 帳戶', 'error');
+        return false;
+    }
+
+    if (!DOM.currencySelect.value) {
+        showToast('❌ 請選擇監控外幣', 'error');
+        return false;
+    }
+
+    if (!DOM.conditionSelect.value) {
+        showToast('❌ 請選擇通知條件 (低於/高於)', 'error');
+        return false;
+    }
+
+    const targetRate = parseFloat(DOM.targetRate.value);
+    if (!targetRate || targetRate <= 0) {
+        showToast('❌ 請輸入有效的目標匯率', 'error');
+        return false;
+    }
+
+    return true;
+}
+
+/* ========== 【更新 Placeholder 提示】 ========== */
+function updatePlaceholder() {
+    const placeholders = {
+        'USD': '例: 30.5 (美元)',
+        'JPY': '例: 4.65 (日圓)',
+        'EUR': '例: 33.2 (歐元)',
+        'CNY': '例: 4.2 (人民幣)',
+        'KRW': '例: 0.0225 (韓圜)',
+        'HKD': '例: 3.9 (港元)',
+        'GBP': '例: 38.5 (英鎊)',
+        'VND': '例: 740 (越南盾)',
+        'TWD': '例: 1.0 (台幣)'
+    };
+
+    const selected = DOM.currencySelect.value;
+    DOM.targetRate.placeholder = placeholders[selected] || '請輸入目標匯率';
+}
+
+/* ========== 【登出】 ========== */
+function handleLogout() {
+    try {
+        // 移除 Google Sign-In session
+        window.google?.accounts.id.disableAutoSelect();
+        
+        // 清除本地儲存
+        localStorage.removeItem('currentUser');
+        
+        // 重置全域狀態
+        currentUser = { email: null, name: null, picture: null, isAdmin: false };
+        isAdminView = false;
+
+        // 更新 UI
+        DOM.userInfo.classList.add('hidden');
+        DOM.logoutBtn.classList.add('hidden');
+        DOM.adminToggleBtn.classList.add('hidden');
+        DOM.adminPage.classList.add('hidden');
+        DOM.userPage.classList.remove('hidden');
+        DOM.notificationEmail.value = '';
+        
+        // 重新初始化登入
+        initializeGoogleSignIn();
+
+        showToast('👋 已登出', 'info');
+    } catch (error) {
+        console.error('❌ 登出失敗:', error);
+        showToast('❌ 登出出錯', 'error');
+    }
+}
+
+/* ========== 【切換管理員視圖】 ========== */
+async function toggleAdminView() {
+    if (!currentUser.isAdmin) {
+        showToast('❌ 您沒有管理員權限', 'error');
+        return;
+    }
+
+    isAdminView = !isAdminView;
+
+    if (isAdminView) {
+        DOM.userPage.classList.add('hidden');
+        DOM.adminPage.classList.remove('hidden');
+        DOM.adminToggleBtn.textContent = '返回使用者頁面';
+        
+        // 載入管理員資料
+        await loadAdminData();
+    } else {
+        DOM.adminPage.classList.add('hidden');
+        DOM.userPage.classList.remove('hidden');
+        DOM.adminToggleBtn.textContent = '管理員後台';
+    }
+}
+
+/* ========== 【載入使用者歷史設定】 ========== */
+async function loadUserHistory() {
+    try {
+        // 從 GAS 獲取所有資料
+        const response = await fetch(`${GAS_URL}?action=getAll`);
+        const result = await response.json();
+
+        if (!result.success || !result.data) {
+            console.warn('⚠️ 無法載入歷史資料');
+            return;
+        }
+
+        // 過濾出屬於當前使用者的記錄
+        const userRecords = result.data.filter(record => record.email === currentUser.email);
+
+        if (userRecords.length === 0) {
+            DOM.userHistoryTbody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="px-4 py-8 text-center text-gray-400">
+                        目前還沒有設定的通知
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        // 構建表格行
+        DOM.userHistoryTbody.innerHTML = userRecords.map(record => `
+            <tr>
+                <td class="px-4 py-3">${formatTimestamp(record.timestamp)}</td>
+                <td class="px-4 py-3">${record.currency}</td>
+                <td class="px-4 py-3">${formatCondition(record.condition)}</td>
+                <td class="px-4 py-3">${record.targetRate}</td>
+                <td class="px-4 py-3">${formatStatus(record.status)}</td>
+            </tr>
+        `).join('');
+    } catch (error) {
+        console.error('❌ 載入使用者歷史失敗:', error);
+        showToast('❌ 載入歷史記錄失敗', 'error');
+    }
+}
+
+/* ========== 【載入管理員資料】 ========== */
+async function loadAdminData() {
+    try {
+        // 顯示載入狀態
+        DOM.adminHistoryTbody.innerHTML = `
+            <tr>
+                <td colspan="6" class="px-4 py-8 text-center text-gray-400">
+                    <span class="spinner"></span> 載入中...
+                </td>
+            </tr>
+        `;
+
+        // 從 GAS 獲取所有資料
+        const response = await fetch(`${GAS_URL}?action=getAll`);
+        const result = await response.json();
+
+        if (!result.success || !result.data) {
+            throw new Error('無法從 GAS 讀取資料');
+        }
+
+        const allRecords = result.data;
+
+        // 更新統計數據
+        updateAdminStats(allRecords);
+
+        // 繪製圖表
+        drawCurrencyChart(allRecords);
+
+        // 填充表格
+        if (allRecords.length === 0) {
+            DOM.adminHistoryTbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="px-4 py-8 text-center text-gray-400">
+                        還沒有任何訂閱記錄
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        DOM.adminHistoryTbody.innerHTML = allRecords.map(record => `
+            <tr>
+                <td class="px-4 py-3">${formatTimestamp(record.timestamp)}</td>
+                <td class="px-4 py-3">${record.email}</td>
+                <td class="px-4 py-3"><strong>${record.currency}</strong></td>
+                <td class="px-4 py-3">${formatCondition(record.condition)}</td>
+                <td class="px-4 py-3">${record.targetRate}</td>
+                <td class="px-4 py-3">${formatStatus(record.status)}</td>
+            </tr>
+        `).join('');
+    } catch (error) {
+        console.error('❌ 載入管理員資料失敗:', error);
+        showToast('❌ 載入管理員資料失敗', 'error');
+        DOM.adminHistoryTbody.innerHTML = `
+            <tr>
+                <td colspan="6" class="px-4 py-8 text-center text-red-400">
+                    ❌ 載入失敗，請檢查 GAS 連接
+                </td>
+            </tr>
+        `;
+    }
+}
+
+/* ========== 【更新管理員統計】 ========== */
+function updateAdminStats(records) {
+    const pendingCount = records.filter(r => r.status === 'Pending').length;
+    const sentCount = records.filter(r => r.status === 'Sent').length;
+    const totalCount = records.length;
+
+    DOM.pendingCount.textContent = pendingCount;
+    DOM.sentCount.textContent = sentCount;
+    DOM.totalSubscriptions.textContent = totalCount;
+}
+
+/* ========== 【繪製幣別分佈圓餅圖】 ========== */
+function drawCurrencyChart(records) {
+    // 統計各幣別的訂閱數量
+    const currencyCount = {};
+    records.forEach(record => {
+        currencyCount[record.currency] = (currencyCount[record.currency] || 0) + 1;
+    });
+
+    const labels = Object.keys(currencyCount);
+    const data = Object.values(currencyCount);
+
+    // 定義顏色陣列
+    const colors = [
+        'rgba(59, 130, 246, 0.8)',    // 藍色
+        'rgba(6, 182, 212, 0.8)',     // 青色
+        'rgba(139, 92, 246, 0.8)',    // 紫色
+        'rgba(236, 72, 153, 0.8)',    // 粉色
+        'rgba(34, 197, 94, 0.8)',     // 綠色
+        'rgba(248, 113, 113, 0.8)',   // 紅色
+        'rgba(251, 146, 60, 0.8)',    // 橙色
+        'rgba(34, 211, 238, 0.8)',    // 淡藍色
+        'rgba(168, 85, 247, 0.8)'     // 深紫色
+    ];
+
+    // 銷毀舊圖表
+    if (currencyChart) {
+        currencyChart.destroy();
+    }
+
+    // 建立新圖表
+    const ctx = DOM.currencyChart.getContext('2d');
+    currencyChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: data,
+                backgroundColor: colors.slice(0, labels.length),
+                borderColor: 'rgba(30, 41, 59, 0.8)',
+                borderWidth: 3,
+                hoverBorderColor: 'rgba(59, 130, 246, 1)',
+                hoverBorderWidth: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        color: '#e5e7eb',
+                        font: { size: 12, weight: '500' },
+                        padding: 15,
+                        usePointStyle: true
+                    }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                    titleColor: '#fff',
+                    bodyColor: '#e5e7eb',
+                    borderColor: 'rgba(59, 130, 246, 0.5)',
+                    borderWidth: 1,
+                    padding: 12,
+                    displayColors: true,
+                    callbacks: {
+                        label: function(context) {
+                            const label = context.label || '';
+                            const value = context.parsed || 0;
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = ((value / total) * 100).toFixed(1);
+                            return `${label}: ${value} 筆 (${percentage}%)`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/* ========== 【工具函式：格式化時間戳】 ========== */
+function formatTimestamp(isoString) {
+    try {
+        const date = new Date(isoString);
+        return date.toLocaleString('zh-TW', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    } catch {
+        return isoString;
+    }
+}
+
+/* ========== 【工具函式：格式化條件】 ========== */
+function formatCondition(condition) {
+    const conditionMap = {
+        'below': '📉 低於',
+        'above': '📈 高於'
+    };
+    return conditionMap[condition] || condition;
+}
+
+/* ========== 【工具函式：格式化狀態】 ========== */
+function formatStatus(status) {
+    if (status === 'Pending') {
+        return '<span class="status-pending">⏳ 待送出</span>';
+    } else if (status === 'Sent') {
+        return '<span class="status-sent">✅ 已送出</span>';
+    }
+    return status;
+}
+
+/* ========== 【Toast 彈出通知系統】 ========== */
+function showToast(message, type = 'info', duration = 4000) {
+    const toast = document.createElement('div');
+    toast.className = `toast rounded-lg px-6 py-4 flex items-center space-x-3 backdrop-blur-sm ${type === 'success' ? 'toast-success' : type === 'error' ? 'toast-error' : type === 'warning' ? 'toast-warning' : 'toast-info'}`;
+    
+    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️';
+    
+    toast.innerHTML = `
+        <span>${icon}</span>
+        <span class="font-medium">${message}</span>
+    `;
+
+    DOM.toastContainer.appendChild(toast);
+
+    // 自動移除
+    setTimeout(() => {
+        toast.classList.add('hide');
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
+}
+
+/* ========== 【應用程式初始化完成】 ========== */
+console.log('%c✨ 外幣匯率到價通知系統已啟動！', 'color: #3b82f6; font-size: 16px; font-weight: bold;');
